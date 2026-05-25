@@ -1,21 +1,25 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 
 const require = createRequire(import.meta.url);
-const { mkdirSync } = require('fs');
-const Database = require('better-sqlite3');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.RESUME_DATA_DIR || (process.env.VERCEL ? '/tmp/ai-resume-assistant' : path.join(__dirname, 'data'));
 const DB_PATH = process.env.RESUME_DB_PATH || path.join(DATA_DIR, 'resume.db');
+const STORE_PATH = process.env.RESUME_STORE_PATH || path.join(DATA_DIR, 'store.json');
+const USE_FILE_STORE = Boolean(process.env.VERCEL);
 
 let db;
+let fileStore;
 
 function getDb() {
+  if (USE_FILE_STORE) throw new Error('SQLite is disabled on Vercel. Use the file store adapter.');
   if (!db) {
+    const Database = require('better-sqlite3');
     mkdirSync(path.dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
@@ -57,6 +61,25 @@ function getDb() {
     ensureColumn(db, 'projects', 'user_id', 'TEXT');
   }
   return db;
+}
+
+function getStore() {
+  if (!fileStore) {
+    mkdirSync(path.dirname(STORE_PATH), { recursive: true });
+    if (existsSync(STORE_PATH)) {
+      fileStore = JSON.parse(readFileSync(STORE_PATH, 'utf8'));
+    } else {
+      fileStore = { users: [], sessions: [], projects: [] };
+      writeStore();
+    }
+  }
+  return fileStore;
+}
+
+function writeStore() {
+  if (!fileStore) return;
+  mkdirSync(path.dirname(STORE_PATH), { recursive: true });
+  writeFileSync(STORE_PATH, JSON.stringify(fileStore, null, 2));
 }
 
 function ensureColumn(conn, table, column, definition) {
@@ -130,6 +153,30 @@ function rowToUser(row) {
 }
 
 export async function createUser({ email, name, password }) {
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const normalizedEmail = normalizeEmail(email);
+    const now = new Date().toISOString();
+    const id = uuidv4();
+    const row = {
+      id,
+      email: normalizedEmail,
+      name: name || normalizedEmail.split('@')[0],
+      password_hash: hashPassword(password),
+      created_at: now,
+      updated_at: now
+    };
+    const existingCount = store.users.length;
+    store.users.push(row);
+    if (existingCount === 0) {
+      store.projects = store.projects.map(project => (
+        project.user_id ? project : { ...project, user_id: id }
+      ));
+    }
+    writeStore();
+    return rowToUser(row);
+  }
+
   const conn = getDb();
   const normalizedEmail = normalizeEmail(email);
   const now = new Date().toISOString();
@@ -146,6 +193,10 @@ export async function createUser({ email, name, password }) {
 }
 
 export async function getUserByEmail(email) {
+  if (USE_FILE_STORE) {
+    return getStore().users.find(user => user.email === normalizeEmail(email)) || null;
+  }
+
   const conn = getDb();
   return conn.prepare('SELECT * FROM users WHERE email = ?').get(normalizeEmail(email));
 }
@@ -157,6 +208,21 @@ export async function authenticateUser(email, password) {
 }
 
 export async function createSession(userId) {
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const now = new Date();
+    const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const id = randomBytes(32).toString('hex');
+    store.sessions.push({
+      id,
+      user_id: userId,
+      expires_at: expires.toISOString(),
+      created_at: now.toISOString()
+    });
+    writeStore();
+    return { id, expiresAt: expires };
+  }
+
   const conn = getDb();
   const now = new Date();
   const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -170,6 +236,13 @@ export async function createSession(userId) {
 
 export async function getUserBySession(sessionId) {
   if (!sessionId) return null;
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const session = store.sessions.find(item => item.id === sessionId && item.expires_at > new Date().toISOString());
+    if (!session) return null;
+    return rowToUser(store.users.find(user => user.id === session.user_id));
+  }
+
   const conn = getDb();
   const row = conn.prepare(`
     SELECT users.* FROM sessions
@@ -181,24 +254,68 @@ export async function getUserBySession(sessionId) {
 
 export async function deleteSession(sessionId) {
   if (!sessionId) return false;
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const before = store.sessions.length;
+    store.sessions = store.sessions.filter(session => session.id !== sessionId);
+    writeStore();
+    return store.sessions.length < before;
+  }
+
   const conn = getDb();
   const result = conn.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   return result.changes > 0;
 }
 
 export async function listProjects(userId) {
+  if (USE_FILE_STORE) {
+    return getStore().projects
+      .filter(project => project.user_id === userId)
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      .map(rowToProject);
+  }
+
   const conn = getDb();
   const rows = conn.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC').all(userId);
   return rows.map(rowToProject);
 }
 
 export async function getProject(id, userId) {
+  if (USE_FILE_STORE) {
+    const project = getStore().projects.find(item => item.id === id && item.user_id === userId);
+    return project ? rowToProject(project) : null;
+  }
+
   const conn = getDb();
   const row = conn.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, userId);
   return row ? rowToProject(row) : null;
 }
 
 export async function createProject(payload, userId) {
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const now = new Date().toISOString();
+    const id = uuidv4();
+    const row = {
+      id,
+      user_id: userId,
+      title: payload.title || '未命名简历任务',
+      mode: payload.mode || 'optimize',
+      status: payload.status || 'draft',
+      jd: payload.jd || '',
+      resume: serialize(payload.resume || null),
+      materials: serialize(payload.materials || []),
+      analysis: serialize(payload.analysis || null),
+      versions: serialize(payload.versions || []),
+      error: payload.error || null,
+      created_at: now,
+      updated_at: now
+    };
+    store.projects.push(row);
+    writeStore();
+    return rowToProject(row);
+  }
+
   const conn = getDb();
   const now = new Date().toISOString();
   const id = uuidv4();
@@ -221,6 +338,29 @@ export async function createProject(payload, userId) {
 }
 
 export async function updateProject(id, patch, userId) {
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const index = store.projects.findIndex(item => item.id === id && item.user_id === userId);
+    if (index < 0) return null;
+    const existing = store.projects[index];
+    const row = {
+      ...existing,
+      title: patch.title ?? existing.title,
+      mode: patch.mode ?? existing.mode,
+      status: patch.status ?? existing.status,
+      jd: patch.jd ?? existing.jd,
+      resume: patch.resume !== undefined ? serialize(patch.resume) : existing.resume,
+      materials: patch.materials !== undefined ? serialize(patch.materials) : existing.materials,
+      analysis: patch.analysis !== undefined ? serialize(patch.analysis) : existing.analysis,
+      versions: patch.versions !== undefined ? serialize(patch.versions) : existing.versions,
+      error: patch.error !== undefined ? (patch.error || null) : existing.error,
+      updated_at: new Date().toISOString()
+    };
+    store.projects[index] = row;
+    writeStore();
+    return rowToProject(row);
+  }
+
   const conn = getDb();
   const existing = conn.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, userId);
   if (!existing) return null;
@@ -246,6 +386,14 @@ export async function updateProject(id, patch, userId) {
 }
 
 export async function deleteProject(id, userId) {
+  if (USE_FILE_STORE) {
+    const store = getStore();
+    const before = store.projects.length;
+    store.projects = store.projects.filter(item => !(item.id === id && item.user_id === userId));
+    writeStore();
+    return store.projects.length < before;
+  }
+
   const conn = getDb();
   const result = conn.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(id, userId);
   return result.changes > 0;
