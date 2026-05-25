@@ -1,6 +1,4 @@
 import path from 'node:path';
-import mammoth from 'mammoth';
-import { PDFParse } from 'pdf-parse';
 import { extractImageText } from './ocrImage.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
@@ -14,11 +12,13 @@ export async function parseUploadedFile(file) {
   }
 
   if (ext === '.docx' || mime.includes('wordprocessingml')) {
+    const mammoth = await import('mammoth');
     const result = await mammoth.extractRawText({ buffer: file.buffer });
     return result.value;
   }
 
   if (ext === '.pdf' || mime === 'application/pdf') {
+    const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: file.buffer });
     try {
       const result = await parser.getText();
