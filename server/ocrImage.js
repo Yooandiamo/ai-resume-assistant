@@ -55,6 +55,9 @@ async function extractWithTesseract(file) {
 }
 
 export async function extractImageText(file) {
+  if (process.env.VERCEL) {
+    throw new Error('Vercel 内测环境暂不支持图片 OCR，请先粘贴 JD 文本，或上传 PDF/Word/TXT/Markdown 文件。');
+  }
   if (isMac) {
     return extractWithVision(file);
   }

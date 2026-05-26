@@ -45,7 +45,7 @@ export function FileList({ files, onRemove, onPreview }) {
             <span className="text-xs font-medium text-slate-700 truncate">{file.name || '未命名文件'}</span>
             {file.status === 'parsing' && <span className="ml-2 text-[10px] text-indigo-500 shrink-0">解析中</span>}
             {file.status === 'ready' && <span className="ml-2 text-[10px] text-emerald-500 shrink-0">{file.size}</span>}
-            {file.status === 'error' && <span className="ml-2 text-[10px] text-rose-500 shrink-0">解析失败</span>}
+            {file.status === 'error' && <span className="ml-2 text-[10px] text-rose-500 shrink-0" title={file.error || '解析失败'}>{file.error || '解析失败'}</span>}
           </div>
           <div className="flex items-center gap-1 ml-2 shrink-0">
             {file.status === 'ready' && onPreview && (
