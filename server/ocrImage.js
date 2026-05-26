@@ -38,7 +38,12 @@ async function extractWithVision(file) {
 
 async function extractWithTesseract(file) {
   const { createWorker } = await import('tesseract.js');
+  const cachePath = path.join(os.tmpdir(), 'ai-resume-tessdata');
+  await fs.mkdir(cachePath, { recursive: true });
   const worker = await createWorker('chi_sim+eng', 1, {
+    cachePath,
+    langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
+    gzip: true,
     logger: () => {} // suppress progress logs
   });
 
@@ -55,9 +60,6 @@ async function extractWithTesseract(file) {
 }
 
 export async function extractImageText(file) {
-  if (process.env.VERCEL) {
-    throw new Error('Vercel 内测环境暂不支持图片 OCR，请先粘贴 JD 文本，或上传 PDF/Word/TXT/Markdown 文件。');
-  }
   if (isMac) {
     return extractWithVision(file);
   }
